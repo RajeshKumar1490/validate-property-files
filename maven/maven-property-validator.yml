@@ -1,0 +1,73 @@
+name: Validate Property Files
+
+on:
+  pull_request:
+    branches:
+      - dev
+      - staging
+      - main
+
+jobs:
+  validate-properties:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set environment-specific files based on branch
+        id: set-files
+        run: |
+          if [[ ${{ github.base_ref }} == "dev" ]]; then
+            echo "source_file=src/main/resources/application.properties" >> $GITHUB_ENV
+            echo "destination_files=config/dev-application.properties" >> $GITHUB_ENV
+          elif [[ ${{ github.base_ref }} == "staging" ]]; then
+            echo "source_file=config/dev-application.properties" >> $GITHUB_ENV
+            echo "destination_files=config/qa-application.properties config/staging-application.properties" >> $GITHUB_ENV
+          elif [[ ${{ github.base_ref }} == "main" ]]; then
+            echo "source_file=config/staging-application.properties" >> $GITHUB_ENV
+            echo "destination_files=config/prod1-application.properties config/prod2-application.properties" >> $GITHUB_ENV
+          else
+            echo "Error: Unsupported branch ${{ github.base_ref }}" >&2
+            exit 1
+          fi
+
+      - name: Validate properties
+        run: |
+          SOURCE_FILE=$source_file
+          DESTINATION_FILES=($destination_files)
+
+          echo "Source file: $SOURCE_FILE"
+          echo "Comparing $SOURCE_FILE with destination files: ${DESTINATION_FILES[*]}"
+
+          ALL_ISSUES=""
+
+          for DESTINATION_FILE in "${DESTINATION_FILES[@]}"; do
+            echo "Processing $DESTINATION_FILE..."
+
+            # Extract property keys from source and destination files
+            SOURCE_KEYS=$(grep -o '^[^#]*=' "$SOURCE_FILE" | cut -d= -f1 | sort)
+            DEST_KEYS=$(grep -o '^[^#]*=' "$DESTINATION_FILE" | cut -d= -f1 | sort)
+
+            # Check for missing keys in destination
+            MISSING_KEYS=$(comm -23 <(echo "$SOURCE_KEYS") <(echo "$DEST_KEYS"))
+            if [[ ! -z "$MISSING_KEYS" ]]; then
+              ALL_ISSUES+="Missing keys in $DESTINATION_FILE:\n$MISSING_KEYS\n\n"
+            fi
+
+            # Check for empty values in destination
+            while IFS= read -r KEY; do
+              SOURCE_VALUE=$(grep "^$KEY=" "$SOURCE_FILE" | cut -d= -f2-)
+              DEST_VALUE=$(grep "^$KEY=" "$DESTINATION_FILE" | cut -d= -f2-)
+              if [[ -z "$DEST_VALUE" && ! -z "$SOURCE_VALUE" ]]; then
+                ALL_ISSUES+="Key $KEY in $DESTINATION_FILE has an empty value but is set in $SOURCE_FILE.\n"
+              fi
+            done <<< "$SOURCE_KEYS"
+          done
+
+          if [[ ! -z "$ALL_ISSUES" ]]; then
+            echo -e "Validation issues found:\n$ALL_ISSUES"
+            exit 1
+          else
+            echo "Property files validation passed!"
+          fi
